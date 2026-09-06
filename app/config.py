@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     log_json: bool = True
     allow_top_k: bool = False  # M3: False до smoke LM Studio
 
+    @field_validator("default_seed", mode="before")
+    @classmethod
+    def _empty_seed_to_none(cls, v: object) -> object:
+        if v == "":
+            return None
+        return v
+
     @field_validator("default_temperature")
     @classmethod
     def _temp(cls, v: float) -> float:

@@ -1,7 +1,7 @@
 [project]
 name = "ai-advent-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
@@ -38,10 +38,10 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 plugins = ["pydantic.mypy"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
