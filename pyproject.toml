@@ -1,0 +1,47 @@
+[project]
+name = "ai-advent-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "chainlit>=1.3.0",
+  "httpx>=0.27.0",
+  "openai>=1.50.0",          # async OpenAI SDK
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.5.0",
+  "python-dotenv>=1.0.0",
+  "tenacity>=9.0.0",         # retries для нестабильных локальных LLM
+  "structlog>=24.0.0",       # JSON-логи метаданных вызовов
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "respx>=0.21.0",           # моки httpx (openai SDK); обязателен для unit LLM
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "pre-commit>=3.8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
