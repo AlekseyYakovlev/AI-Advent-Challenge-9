@@ -13,11 +13,10 @@ from app.services.context import truncate_messages
 # конфигурируем логи здесь (idempotent, дубль с main.py безопасен).
 configure_logging(json_logs=get_settings().log_json)
 
-PROMPT_ENGINEERING_SYSTEM = (
-    "Ты эксперт по промпт-инжинирингу. Твоя задача — преобразовать запрос "
-    "пользователя в детальный, структурированный и эффективный промпт для "
-    "языковой модели. Верни ТОЛЬКО текст промпта, без каких-либо "
-    "дополнительных комментариев, пояснений или обрамляющих фраз."
+# Компактная EN-обёртка: без отдельного system — экономия токенов.
+PROMPT_GEN_USER_TEMPLATE = (
+    'Generate a prompt to solve the following question: "{question}". '
+    'Return only the prompt.'
 )
 
 
@@ -59,8 +58,10 @@ async def on_settings_update(settings: dict[str, object]) -> None:
             max_tokens=settings.get("max_tokens", current.max_tokens),
             seed=settings.get("seed", current.seed),
             top_k=current.top_k,  # M3: виджет скрыт — не читать из UI
-            system_prompt=str(
-                settings.get("system_prompt", current.system_prompt)
+            system_prompt=(
+                ""
+                if settings.get("system_prompt", current.system_prompt) is None
+                else str(settings.get("system_prompt", current.system_prompt))
             ),
             stop=settings.get("stop", current.stop),
             step_by_step=bool(
@@ -88,6 +89,11 @@ async def on_settings_update(settings: dict[str, object]) -> None:
     ).send()
 
 
+def wrap_user_question_for_prompt_generation(question: str) -> str:
+    """Оборачивает исходный вопрос для первого (prompt-gen) запроса к LLM."""
+    return PROMPT_GEN_USER_TEMPLATE.format(question=question)
+
+
 async def generate_improved_prompt(
     history: list[ChatMessage],
     model_settings: ModelSettings,
@@ -97,13 +103,24 @@ async def generate_improved_prompt(
     """Этап 1: non-streaming генерация улучшенного промпта."""
     prompt_gen_settings = model_settings.model_copy(
         update={
-            "system_prompt": PROMPT_ENGINEERING_SYSTEM,
+            "system_prompt": "",  # только user-обёртка, без лишнего system
             "step_by_step": False,
         }
     )
+    # В API уходит обёрнутый вопрос, history по-прежнему хранит исходный текст
+    # до успешной замены на сгенерированный промпт.
+    if not history or history[-1].role != "user":
+        raise ValueError("Для генерации промпта нужен последний user-сообщение")
+    prompt_history = [
+        *history[:-1],
+        ChatMessage(
+            role="user",
+            content=wrap_user_question_for_prompt_generation(history[-1].content),
+        ),
+    ]
     # provider.chat не инжектит system_prompt — готовим messages как AgentService
     messages = truncate_messages(
-        history,
+        prompt_history,
         max_messages=app_settings.max_history_messages,
         max_chars=app_settings.max_context_chars,
         system_prompt=prompt_gen_settings.system_prompt,

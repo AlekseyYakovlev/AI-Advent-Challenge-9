@@ -4,7 +4,10 @@ import httpx
 import pytest
 import respx
 
-from app.chainlit.app import PROMPT_ENGINEERING_SYSTEM, generate_improved_prompt
+from app.chainlit.app import (
+    generate_improved_prompt,
+    wrap_user_question_for_prompt_generation,
+)
 from app.chainlit.settings_schema import build_chat_settings
 from app.config import Settings
 from app.llm.base import ChatMessage, ModelSettings
@@ -76,9 +79,16 @@ def test_build_chat_settings_includes_pre_generated_prompt_switch() -> None:
     assert "pre_generated_prompt" in ids
 
 
+def test_wrap_user_question_for_prompt_generation() -> None:
+    assert wrap_user_question_for_prompt_generation("how to catch a butterfly?") == (
+        'Generate a prompt to solve the following question: "how to catch a butterfly?". '
+        "Return only the prompt."
+    )
+
+
 @respx.mock
 @pytest.mark.asyncio
-async def test_generate_improved_prompt_uses_engineering_system(
+async def test_generate_improved_prompt_sends_only_wrapped_user_message(
     provider: OpenAICompatibleProvider,
 ) -> None:
     generated = (
@@ -95,6 +105,7 @@ async def test_generate_improved_prompt_uses_engineering_system(
         model="Bionic",
         pre_generated_prompt=True,
         step_by_step=True,
+        system_prompt="не должен уйти на этапе 1",
     )
     result = await generate_improved_prompt(
         history, settings, provider, Settings()
@@ -103,8 +114,14 @@ async def test_generate_improved_prompt_uses_engineering_system(
     assert result == generated
     assert route.call_count == 1
     body = json.loads(_request_body_bytes(route.calls[0].request))
-    assert body["messages"][0]["role"] == "system"
-    assert body["messages"][0]["content"] == PROMPT_ENGINEERING_SYSTEM
+    roles = [m["role"] for m in body["messages"]]
+    assert "system" not in roles
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": wrap_user_question_for_prompt_generation("расскажи про async"),
+        }
+    ]
     assert body["stream"] is False
 
 
@@ -122,7 +139,8 @@ async def test_pre_generated_prompt_two_stage_updates_history(
         ]
     )
 
-    history = [ChatMessage(role="user", content="что такое рекурсия?")]
+    user_question = "что такое рекурсия?"
+    history = [ChatMessage(role="user", content=user_question)]
     model_settings = ModelSettings(
         provider="lmstudio",
         model="Bionic",
@@ -148,6 +166,13 @@ async def test_pre_generated_prompt_two_stage_updates_history(
     assert history[0].content == generated
     assert history[1].role == "assistant"
     assert history[1].content == final_answer
+
+    body1 = json.loads(_request_body_bytes(route.calls[0].request))
+    assert body1["stream"] is False
+    assert "system" not in [m["role"] for m in body1["messages"]]
+    assert body1["messages"][-1]["content"] == wrap_user_question_for_prompt_generation(
+        user_question
+    )
 
     # Второй вызов — stream с оригинальным system_prompt пользователя
     body2 = json.loads(_request_body_bytes(route.calls[1].request))
