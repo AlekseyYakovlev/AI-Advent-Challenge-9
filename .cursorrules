@@ -1,0 +1,6 @@
+   - Python 3.13, строгая типизация (mypy).
+   - Только async/await (httpx, openai SDK).
+   - Используй pydantic v2 и pydantic-settings.
+   - Логирование только через structlog.
+   - Для тестов LLM используй respx, никогда не мокай методы openai SDK напрямую.
+   - При ошибках OpenAI API проверяй status_code, не полагайся слепо на типы исключений.
