@@ -32,6 +32,11 @@ def build_chat_settings(current: ModelSettings) -> list[Any]:
             label="step-by-step approach",
             initial=current.step_by_step,
         ),
+        Switch(
+            id="pre_generated_prompt",
+            label="Pre-generated prompt (сначала составить промпт, затем ответить)",
+            initial=current.pre_generated_prompt,
+        ),
         # Позже: Select по list_models() — после стабилизации LM Studio
         Slider(
             id="temperature",

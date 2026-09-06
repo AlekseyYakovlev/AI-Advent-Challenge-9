@@ -25,6 +25,7 @@ class ModelSettings(BaseModel):
     system_prompt: str = "Ты полезный ассистент."
     stop: list[str] | None = None
     step_by_step: bool = False
+    pre_generated_prompt: bool = False
 
     @field_validator("seed", mode="before")
     @classmethod

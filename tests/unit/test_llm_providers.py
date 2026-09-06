@@ -181,6 +181,7 @@ def test_model_settings_default_seed_is_42() -> None:
     settings = ModelSettings(provider="lmstudio", model="Bionic")
     assert settings.seed == 42
     assert settings.step_by_step is False
+    assert settings.pre_generated_prompt is False
 
 
 def test_model_settings_rejects_bad_temperature() -> None:
