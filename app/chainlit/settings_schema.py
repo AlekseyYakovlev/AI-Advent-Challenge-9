@@ -1,6 +1,6 @@
 from typing import Any
 
-from chainlit.input_widget import Select, Slider, TextInput
+from chainlit.input_widget import Select, Slider, Switch, TextInput
 
 from app.llm.base import ModelSettings
 
@@ -26,6 +26,11 @@ def build_chat_settings(current: ModelSettings) -> list[Any]:
             initial=current.system_prompt,
             placeholder="Инструкция для модели…",
             multiline=True,
+        ),
+        Switch(
+            id="step_by_step",
+            label="step-by-step approach",
+            initial=current.step_by_step,
         ),
         # Позже: Select по list_models() — после стабилизации LM Studio
         Slider(

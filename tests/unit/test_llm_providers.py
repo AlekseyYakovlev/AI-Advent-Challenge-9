@@ -177,6 +177,12 @@ def test_model_settings_parses_stop_and_seed() -> None:
     assert settings.stop == ["###", "END"]
 
 
+def test_model_settings_default_seed_is_42() -> None:
+    settings = ModelSettings(provider="lmstudio", model="Bionic")
+    assert settings.seed == 42
+    assert settings.step_by_step is False
+
+
 def test_model_settings_rejects_bad_temperature() -> None:
     with pytest.raises(Exception):
         ModelSettings(provider="lmstudio", model="Bionic", temperature=3.0)

@@ -5,6 +5,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+STEP_BY_STEP_INSTRUCTION = (
+    "Please use a step-by-step approach. For each step, briefly explain "
+    "your reasoning before moving to the next one. Finally, summarize "
+    "the solution at the end."
+)
+
 
 class ModelSettings(BaseModel):
     """Параметры генерации в рамках сессии Chainlit."""
@@ -14,10 +20,11 @@ class ModelSettings(BaseModel):
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     top_p: float = Field(0.9, ge=0.0, le=1.0)
     max_tokens: int = Field(2048, ge=1)
-    seed: int | None = None
+    seed: int | None = 42
     top_k: int | None = Field(None, ge=1)  # не слать в API, пока не подтверждён бэкенд (M3)
     system_prompt: str = "Ты полезный ассистент."
     stop: list[str] | None = None
+    step_by_step: bool = False
 
     @field_validator("seed", mode="before")
     @classmethod

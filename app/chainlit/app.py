@@ -24,6 +24,7 @@ async def on_chat_start() -> None:
         max_tokens=settings.default_max_tokens,
         seed=settings.default_seed,
         system_prompt=settings.default_system_prompt,
+        step_by_step=False,
     )
     cl.user_session.set("model_settings", model_settings)
     cl.user_session.set("history", [])
@@ -53,6 +54,9 @@ async def on_settings_update(settings: dict[str, object]) -> None:
                 settings.get("system_prompt", current.system_prompt)
             ),
             stop=settings.get("stop", current.stop),
+            step_by_step=bool(
+                settings.get("step_by_step", current.step_by_step)
+            ),
         )
     except (ValidationError, ValueError, TypeError) as exc:
         await cl.Message(content=f"Некорректные настройки: {exc}").send()

@@ -5,7 +5,7 @@ import structlog
 from openai import BadRequestError
 
 from app.config import Settings
-from app.llm.base import ChatMessage, LLMProvider, ModelSettings
+from app.llm.base import STEP_BY_STEP_INSTRUCTION, ChatMessage, LLMProvider, ModelSettings
 from app.services.context import truncate_messages
 
 log = structlog.get_logger()
@@ -34,6 +34,8 @@ class AgentService:
         settings: ModelSettings,
     ) -> AsyncIterator[str]:
         system_prompt = settings.system_prompt or self._settings.default_system_prompt
+        if settings.step_by_step:
+            system_prompt = f"{system_prompt}\n\n{STEP_BY_STEP_INSTRUCTION}"
         messages = truncate_messages(
             history,
             max_messages=self._settings.max_history_messages,

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     default_temperature: float = 0.7
     default_top_p: float = 0.9
     default_max_tokens: int = 2048
-    default_seed: int | None = None
+    default_seed: int | None = 42
     request_timeout_sec: float = 120.0
     health_timeout_sec: float = 5.0  # короткий ping в /api/health
 
