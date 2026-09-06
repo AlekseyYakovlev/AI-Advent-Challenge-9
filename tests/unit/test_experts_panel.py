@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from app.chainlit.settings_schema import build_chat_settings
+from app.chainlit.settings_schema import build_chat_settings, resolve_exclusive_modes
 from app.config import Settings
 from app.llm.base import (
     DEFAULT_EXPERTS_CONFIG,
@@ -122,6 +122,93 @@ def test_build_chat_settings_includes_expert_widgets_first() -> None:
     assert "system_prompt" in ids
     assert "expert_count" not in ids
     assert "expert_0_role" not in ids
+
+
+def test_resolve_exclusive_modes_enabling_expert_disables_others() -> None:
+    current = ModelSettings(
+        provider="lmstudio",
+        model="Bionic",
+        step_by_step=True,
+        pre_generated_prompt=True,
+        expert_panel_enabled=False,
+    )
+    step, pre_gen, expert = resolve_exclusive_modes(
+        current=current,
+        step_by_step=True,
+        pre_generated_prompt=True,
+        expert_panel_enabled=True,
+    )
+    assert (step, pre_gen, expert) == (False, False, True)
+
+    widgets = build_chat_settings(
+        ModelSettings(
+            provider="lmstudio",
+            model="Bionic",
+            step_by_step=step,
+            pre_generated_prompt=pre_gen,
+            expert_panel_enabled=expert,
+        )
+    )
+    by_id = {getattr(w, "id", None): w for w in widgets}
+    assert by_id["expert_panel_enabled"].initial is True
+    assert by_id["step_by_step"].initial is False
+    assert by_id["pre_generated_prompt"].initial is False
+
+
+def test_resolve_exclusive_modes_enabling_step_or_pregen_disables_expert() -> None:
+    current = ModelSettings(
+        provider="lmstudio",
+        model="Bionic",
+        expert_panel_enabled=True,
+    )
+    step, pre_gen, expert = resolve_exclusive_modes(
+        current=current,
+        step_by_step=True,
+        pre_generated_prompt=False,
+        expert_panel_enabled=True,
+    )
+    assert (step, pre_gen, expert) == (True, False, False)
+
+    step2, pre_gen2, expert2 = resolve_exclusive_modes(
+        current=current,
+        step_by_step=False,
+        pre_generated_prompt=True,
+        expert_panel_enabled=True,
+    )
+    assert (step2, pre_gen2, expert2) == (False, True, False)
+
+
+def test_resolve_exclusive_modes_steady_state_keeps_expert_exclusive() -> None:
+    # Уже включён expert; step/pre_gen тоже True (битое состояние) —
+    # при отсутствии нового включения expert остаётся единственным.
+    current = ModelSettings(
+        provider="lmstudio",
+        model="Bionic",
+        step_by_step=True,
+        pre_generated_prompt=True,
+        expert_panel_enabled=True,
+    )
+    step, pre_gen, expert = resolve_exclusive_modes(
+        current=current,
+        step_by_step=True,
+        pre_generated_prompt=True,
+        expert_panel_enabled=True,
+    )
+    assert (step, pre_gen, expert) == (False, False, True)
+
+    # Чистый steady-state только с expert.
+    clean = ModelSettings(
+        provider="lmstudio",
+        model="Bionic",
+        expert_panel_enabled=True,
+    )
+    step2, pre_gen2, expert2 = resolve_exclusive_modes(
+        current=clean,
+        step_by_step=False,
+        pre_generated_prompt=False,
+        expert_panel_enabled=True,
+    )
+    assert (step2, pre_gen2, expert2) == (False, False, True)
 
 
 @pytest.mark.asyncio

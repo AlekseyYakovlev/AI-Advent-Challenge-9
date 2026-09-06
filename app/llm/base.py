@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 STEP_BY_STEP_INSTRUCTION = (
     "Please use a step-by-step approach. For each step, briefly explain "
     "your reasoning before moving to the next one. Finally, summarize "
-    "the solution at the end."
+    "the solution at the end. CRITICAL: Keep the language of the output "
+    "identical to the language of the user's request."
 )
 
 DEFAULT_EXPERTS_CONFIG = (

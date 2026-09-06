@@ -1,7 +1,12 @@
 import chainlit as cl
 from pydantic import ValidationError
 
-from app.chainlit.settings_schema import build_chat_settings
+from app.chainlit.settings_schema import (
+    build_chat_settings,
+    draft_settings_from_ui,
+    exclusive_modes_snapshot,
+    resolve_exclusive_modes,
+)
 from app.config import Settings, get_settings
 from app.llm.base import (
     DEFAULT_EXPERTS_CONFIG,
@@ -45,6 +50,14 @@ async def on_chat_start() -> None:
     cl.user_session.set("model_settings", model_settings)
     cl.user_session.set("history", [])
     cl.user_session.set("expert_panel_notice_sent", False)
+    cl.user_session.set(
+        "exclusive_modes_snapshot",
+        exclusive_modes_snapshot(
+            step_by_step=False,
+            pre_generated_prompt=False,
+            expert_panel_enabled=False,
+        ),
+    )
 
     await cl.ChatSettings(build_chat_settings(model_settings)).send()
     await cl.Message(
@@ -55,44 +68,86 @@ async def on_chat_start() -> None:
     ).send()
 
 
+def _resolve_modes_against_baseline(
+    settings: dict[str, object],
+    baseline: ModelSettings,
+) -> tuple[bool, bool, bool]:
+    return resolve_exclusive_modes(
+        current=baseline,
+        step_by_step=bool(settings.get("step_by_step", baseline.step_by_step)),
+        pre_generated_prompt=bool(
+            settings.get("pre_generated_prompt", baseline.pre_generated_prompt)
+        ),
+        expert_panel_enabled=bool(
+            settings.get("expert_panel_enabled", baseline.expert_panel_enabled)
+        ),
+    )
+
+
+@cl.on_settings_edit
+async def on_settings_edit(settings: dict[str, object]) -> None:
+    """Живое обновление UI: гасит конфликтующие Switch сразу при клике."""
+    current: ModelSettings = cl.user_session.get("model_settings")
+    snapshot = cl.user_session.get("exclusive_modes_snapshot")
+    baseline = (
+        current.model_copy(update=snapshot)
+        if isinstance(snapshot, dict)
+        else current
+    )
+
+    incoming_step = bool(settings.get("step_by_step", baseline.step_by_step))
+    incoming_pre = bool(
+        settings.get("pre_generated_prompt", baseline.pre_generated_prompt)
+    )
+    incoming_expert = bool(
+        settings.get("expert_panel_enabled", baseline.expert_panel_enabled)
+    )
+    step_by_step, pre_generated_prompt, expert_panel_enabled = (
+        _resolve_modes_against_baseline(settings, baseline)
+    )
+
+    new_snapshot = exclusive_modes_snapshot(
+        step_by_step, pre_generated_prompt, expert_panel_enabled
+    )
+    cl.user_session.set("exclusive_modes_snapshot", new_snapshot)
+
+    # Без изменений — не дергаем refresh (защита от лишних циклов).
+    if (step_by_step, pre_generated_prompt, expert_panel_enabled) == (
+        incoming_step,
+        incoming_pre,
+        incoming_expert,
+    ):
+        return
+
+    try:
+        draft = draft_settings_from_ui(
+            settings,
+            current,
+            step_by_step=step_by_step,
+            pre_generated_prompt=pre_generated_prompt,
+            expert_panel_enabled=expert_panel_enabled,
+        )
+    except (ValidationError, ValueError, TypeError):
+        return
+
+    # refresh() пушит виджеты в открытую панель Settings, не коммитя session.
+    await cl.ChatSettings(build_chat_settings(draft)).refresh()
+
+
 @cl.on_settings_update
 async def on_settings_update(settings: dict[str, object]) -> None:
     current: ModelSettings = cl.user_session.get("model_settings")
-    expert_panel_enabled = bool(
-        settings.get("expert_panel_enabled", current.expert_panel_enabled)
-    )
-    experts_raw = settings.get("experts_config", current.experts_config)
-    experts_config = (
-        DEFAULT_EXPERTS_CONFIG
-        if experts_raw is None
-        else str(experts_raw)
+    step_by_step, pre_generated_prompt, expert_panel_enabled = (
+        _resolve_modes_against_baseline(settings, current)
     )
 
     try:
-        updated = ModelSettings(
-            provider=str(settings.get("provider", current.provider)),
-            model=str(settings.get("model", current.model)),
-            temperature=settings.get("temperature", current.temperature),
-            top_p=settings.get("top_p", current.top_p),
-            max_tokens=settings.get("max_tokens", current.max_tokens),
-            seed=settings.get("seed", current.seed),
-            top_k=current.top_k,  # M3: виджет скрыт — не читать из UI
-            system_prompt=(
-                ""
-                if settings.get("system_prompt", current.system_prompt) is None
-                else str(settings.get("system_prompt", current.system_prompt))
-            ),
-            stop=settings.get("stop", current.stop),
-            step_by_step=bool(
-                settings.get("step_by_step", current.step_by_step)
-            ),
-            pre_generated_prompt=bool(
-                settings.get(
-                    "pre_generated_prompt", current.pre_generated_prompt
-                )
-            ),
+        updated = draft_settings_from_ui(
+            settings,
+            current,
+            step_by_step=step_by_step,
+            pre_generated_prompt=pre_generated_prompt,
             expert_panel_enabled=expert_panel_enabled,
-            experts_config=experts_config,
         )
     except (ValidationError, ValueError, TypeError) as exc:
         await cl.Message(content=f"Некорректные настройки: {exc}").send()
@@ -105,10 +160,32 @@ async def on_settings_update(settings: dict[str, object]) -> None:
         )
 
     cl.user_session.set("model_settings", updated)
+    cl.user_session.set(
+        "exclusive_modes_snapshot",
+        exclusive_modes_snapshot(
+            updated.step_by_step,
+            updated.pre_generated_prompt,
+            updated.expert_panel_enabled,
+        ),
+    )
     await cl.ChatSettings(build_chat_settings(updated)).send()
-    await cl.Message(
-        content=f"Настройки обновлены: {updated.provider}/{updated.model}"
-    ).send()
+
+    notes: list[str] = [
+        f"Настройки обновлены: {updated.provider}/{updated.model}"
+    ]
+    if expert_panel_enabled and (
+        current.step_by_step or current.pre_generated_prompt
+    ):
+        notes.append(
+            "ℹ️ step-by-step и «Сначала составить промпт…» отключены — "
+            "они несовместимы с «Группой экспертов»."
+        )
+    if (step_by_step or pre_generated_prompt) and current.expert_panel_enabled:
+        notes.append(
+            "ℹ️ «Группа экспертов» отключена — режим несовместим с "
+            "step-by-step / генерацией промпта."
+        )
+    await cl.Message(content="\n".join(notes)).send()
 
     if updated.expert_panel_enabled:
         await cl.Message(content=EXPERT_PANEL_ACTIVE_NOTICE).send()

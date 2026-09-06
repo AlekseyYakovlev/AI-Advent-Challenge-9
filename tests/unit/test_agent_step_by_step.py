@@ -55,6 +55,7 @@ async def test_step_by_step_appends_instruction_to_system_prompt() -> None:
     assert provider.last_messages[0].content == (
         f"Base prompt.\n\n{STEP_BY_STEP_INSTRUCTION}"
     )
+    assert "identical to the language of the user's request" in STEP_BY_STEP_INSTRUCTION
 
 
 @pytest.mark.asyncio

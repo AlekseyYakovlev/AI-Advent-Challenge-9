@@ -5,6 +5,87 @@ from chainlit.input_widget import Select, Slider, Switch, TextInput
 from app.llm.base import DEFAULT_EXPERTS_CONFIG, ModelSettings
 
 
+EXCLUSIVE_MODE_KEYS = (
+    "step_by_step",
+    "pre_generated_prompt",
+    "expert_panel_enabled",
+)
+
+
+def resolve_exclusive_modes(
+    *,
+    current: ModelSettings,
+    step_by_step: bool,
+    pre_generated_prompt: bool,
+    expert_panel_enabled: bool,
+) -> tuple[bool, bool, bool]:
+    """Взаимно исключает «Группу экспертов» и step-by-step / pre-gen.
+
+    Включение expert panel гасит step_by_step и pre_generated_prompt.
+    Включение step_by_step или pre_generated_prompt гасит expert panel.
+    Приоритет у режима, который только что включили.
+    """
+    expert_just_on = expert_panel_enabled and not current.expert_panel_enabled
+    step_just_on = step_by_step and not current.step_by_step
+    pre_gen_just_on = pre_generated_prompt and not current.pre_generated_prompt
+
+    if expert_just_on:
+        return False, False, True
+    if step_just_on or pre_gen_just_on:
+        return step_by_step, pre_generated_prompt, False
+    if expert_panel_enabled:
+        return False, False, True
+    return step_by_step, pre_generated_prompt, False
+
+
+def exclusive_modes_snapshot(
+    step_by_step: bool,
+    pre_generated_prompt: bool,
+    expert_panel_enabled: bool,
+) -> dict[str, bool]:
+    """Снимок взаимоисключающих переключателей для сравнения в on_settings_edit."""
+    return {
+        "step_by_step": step_by_step,
+        "pre_generated_prompt": pre_generated_prompt,
+        "expert_panel_enabled": expert_panel_enabled,
+    }
+
+
+def draft_settings_from_ui(
+    settings: dict[str, object],
+    current: ModelSettings,
+    *,
+    step_by_step: bool,
+    pre_generated_prompt: bool,
+    expert_panel_enabled: bool,
+) -> ModelSettings:
+    """Собирает ModelSettings из UI-формы с уже разрешёнными exclusive-флагами."""
+    experts_raw = settings.get("experts_config", current.experts_config)
+    experts_config = (
+        DEFAULT_EXPERTS_CONFIG if experts_raw is None else str(experts_raw)
+    )
+    return current.model_copy(
+        update={
+            "provider": str(settings.get("provider", current.provider)),
+            "model": str(settings.get("model", current.model)),
+            "temperature": settings.get("temperature", current.temperature),
+            "top_p": settings.get("top_p", current.top_p),
+            "max_tokens": settings.get("max_tokens", current.max_tokens),
+            "seed": settings.get("seed", current.seed),
+            "system_prompt": (
+                ""
+                if settings.get("system_prompt", current.system_prompt) is None
+                else str(settings.get("system_prompt", current.system_prompt))
+            ),
+            "stop": settings.get("stop", current.stop),
+            "step_by_step": step_by_step,
+            "pre_generated_prompt": pre_generated_prompt,
+            "expert_panel_enabled": expert_panel_enabled,
+            "experts_config": experts_config,
+        }
+    )
+
+
 def build_chat_settings(current: ModelSettings) -> list[Any]:
     """Виджеты панели настроек Chainlit."""
     experts_config = current.experts_config or DEFAULT_EXPERTS_CONFIG
