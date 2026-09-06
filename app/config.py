@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     max_allowed_tokens: int = 4096
     max_history_messages: int = 40
     max_context_chars: int = 24_000
-    default_system_prompt: str = "Ты полезный ассистент."
+    default_system_prompt: str = ""
 
     health_verbose: bool = True
     log_json: bool = True

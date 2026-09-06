@@ -53,6 +53,17 @@ def test_system_always_present_even_on_empty_history() -> None:
     assert result == [ChatMessage(role="system", content="SYS")]
 
 
+def test_empty_system_prompt_omitted() -> None:
+    history = [ChatMessage(role="user", content="hi")]
+    result = truncate_messages(
+        history,
+        max_messages=40,
+        max_chars=100,
+        system_prompt="",
+    )
+    assert result == history
+
+
 def test_truncate_does_not_drop_system_when_over_budget() -> None:
     history = [ChatMessage(role="user", content="y" * 10_000)]
     result = truncate_messages(

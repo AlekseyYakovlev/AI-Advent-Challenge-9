@@ -35,7 +35,11 @@ class AgentService:
     ) -> AsyncIterator[str]:
         system_prompt = settings.system_prompt or self._settings.default_system_prompt
         if settings.step_by_step:
-            system_prompt = f"{system_prompt}\n\n{STEP_BY_STEP_INSTRUCTION}"
+            system_prompt = (
+                f"{system_prompt}\n\n{STEP_BY_STEP_INSTRUCTION}"
+                if system_prompt
+                else STEP_BY_STEP_INSTRUCTION
+            )
         messages = truncate_messages(
             history,
             max_messages=self._settings.max_history_messages,

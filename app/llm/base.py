@@ -22,7 +22,7 @@ class ModelSettings(BaseModel):
     max_tokens: int = Field(2048, ge=1)
     seed: int | None = 42
     top_k: int | None = Field(None, ge=1)  # не слать в API, пока не подтверждён бэкенд (M3)
-    system_prompt: str = "Ты полезный ассистент."
+    system_prompt: str = ""
     stop: list[str] | None = None
     step_by_step: bool = False
     pre_generated_prompt: bool = False
