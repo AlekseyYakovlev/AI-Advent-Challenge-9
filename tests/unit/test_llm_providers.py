@@ -137,6 +137,51 @@ async def test_payload_omits_top_k_by_default(provider: OpenAICompatibleProvider
     assert b"top_k" not in body  # M3
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_payload_includes_stop(provider: OpenAICompatibleProvider) -> None:
+    route = respx.post(f"{BASE}/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "1",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+    )
+    await provider.chat(
+        [ChatMessage(role="user", content="x")],
+        ModelSettings(provider="lmstudio", model="Bionic", stop=["###", "END"]),
+    )
+    body = _request_body_bytes(route.calls.last.request)
+    assert b'"stop"' in body
+    assert b"###" in body
+    assert b"END" in body
+
+
+def test_model_settings_parses_stop_and_seed() -> None:
+    settings = ModelSettings(
+        provider="lmstudio",
+        model="Bionic",
+        seed="",
+        stop="###, END",
+    )
+    assert settings.seed is None
+    assert settings.stop == ["###", "END"]
+
+
+def test_model_settings_rejects_bad_temperature() -> None:
+    with pytest.raises(Exception):
+        ModelSettings(provider="lmstudio", model="Bionic", temperature=3.0)
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [

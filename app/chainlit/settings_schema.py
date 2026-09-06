@@ -20,6 +20,13 @@ def build_chat_settings(current: ModelSettings) -> list[Any]:
             initial=current.model,
             placeholder="Bionic / deepseek-chat / ...",
         ),
+        TextInput(
+            id="system_prompt",
+            label="System prompt",
+            initial=current.system_prompt,
+            placeholder="Инструкция для модели…",
+            multiline=True,
+        ),
         # Позже: Select по list_models() — после стабилизации LM Studio
         Slider(
             id="temperature",
@@ -39,11 +46,17 @@ def build_chat_settings(current: ModelSettings) -> list[Any]:
         ),
         Slider(
             id="max_tokens",
-            label="Max tokens",
+            label="Ограничение длины ответа (max tokens)",
             initial=float(min(current.max_tokens, 4096)),  # UI ≤ бэкенд-лимита
             min=64.0,
             max=4096.0,  # не 8192: жёсткий потолок в UI = MAX_ALLOWED_TOKENS
             step=64.0,
+        ),
+        TextInput(
+            id="stop",
+            label="Stop sequence",
+            initial=", ".join(current.stop) if current.stop else "",
+            placeholder="через запятую, напр. ###, END",
         ),
         TextInput(
             id="seed",

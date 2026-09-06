@@ -1,4 +1,5 @@
 import chainlit as cl
+from pydantic import ValidationError
 
 from app.chainlit.settings_schema import build_chat_settings
 from app.config import get_settings
@@ -22,6 +23,7 @@ async def on_chat_start() -> None:
         top_p=settings.default_top_p,
         max_tokens=settings.default_max_tokens,
         seed=settings.default_seed,
+        system_prompt=settings.default_system_prompt,
     )
     cl.user_session.set("model_settings", model_settings)
     cl.user_session.set("history", [])
@@ -38,34 +40,29 @@ async def on_chat_start() -> None:
 @cl.on_settings_update
 async def on_settings_update(settings: dict[str, object]) -> None:
     current: ModelSettings = cl.user_session.get("model_settings")
-    # M2: ручная валидация OK для MVP; при расширении UI → pydantic.BaseModel
     try:
-        seed = _parse_optional_int(settings.get("seed"))
-    except ValueError:
-        await cl.Message(content="seed должен быть целым числом или пустым").send()
+        updated = ModelSettings(
+            provider=str(settings.get("provider", current.provider)),
+            model=str(settings.get("model", current.model)),
+            temperature=settings.get("temperature", current.temperature),
+            top_p=settings.get("top_p", current.top_p),
+            max_tokens=settings.get("max_tokens", current.max_tokens),
+            seed=settings.get("seed", current.seed),
+            top_k=current.top_k,  # M3: виджет скрыт — не читать из UI
+            system_prompt=str(
+                settings.get("system_prompt", current.system_prompt)
+            ),
+            stop=settings.get("stop", current.stop),
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        await cl.Message(content=f"Некорректные настройки: {exc}").send()
         return
 
-    updated = ModelSettings(
-        provider=str(settings.get("provider", current.provider)),
-        model=str(settings.get("model", current.model)),
-        temperature=float(settings.get("temperature", current.temperature)),  # type: ignore[arg-type]
-        top_p=float(settings.get("top_p", current.top_p)),  # type: ignore[arg-type]
-        max_tokens=int(settings.get("max_tokens", current.max_tokens)),  # type: ignore[arg-type]
-        seed=seed,
-        top_k=current.top_k,  # M3: виджет скрыт — не читать из UI
-    )
     app_settings = get_settings()
     if updated.max_tokens > app_settings.max_allowed_tokens:
-        updated.max_tokens = app_settings.max_allowed_tokens
-    if not 0.0 <= updated.temperature <= 2.0:
-        await cl.Message(content="temperature должна быть в диапазоне 0..2").send()
-        return
-    if not 0.0 <= updated.top_p <= 1.0:
-        await cl.Message(content="top_p должна быть в диапазоне 0..1").send()
-        return
-    if updated.max_tokens < 1:
-        await cl.Message(content="max_tokens должен быть ≥ 1").send()
-        return
+        updated = updated.model_copy(
+            update={"max_tokens": app_settings.max_allowed_tokens}
+        )
 
     cl.user_session.set("model_settings", updated)
     await cl.Message(
@@ -80,7 +77,9 @@ async def on_message(message: cl.Message) -> None:
     app_settings = get_settings()
 
     if model_settings.max_tokens > app_settings.max_allowed_tokens:
-        model_settings.max_tokens = app_settings.max_allowed_tokens
+        model_settings = model_settings.model_copy(
+            update={"max_tokens": app_settings.max_allowed_tokens}
+        )
         cl.user_session.set("model_settings", model_settings)
 
     history.append(ChatMessage(role="user", content=message.content))
@@ -107,12 +106,3 @@ async def on_message(message: cl.Message) -> None:
     if succeeded:
         history.append(ChatMessage(role="assistant", content=reply.content))
     cl.user_session.set("history", history)
-
-
-def _parse_optional_int(value: object) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"ожидалось целое число, получено: {value!r}") from exc

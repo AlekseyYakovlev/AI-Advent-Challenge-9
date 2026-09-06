@@ -3,22 +3,46 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel, Field, field_validator
 
-@dataclass(slots=True)
-class ModelSettings:
-    """Параметры генерации в рамках сессии Chainlit.
 
-    MVP: dataclass + ручная валидация в UI.
-    При росте виджетов — мигрировать на pydantic.BaseModel (см. микро-риск M2).
-    """
+class ModelSettings(BaseModel):
+    """Параметры генерации в рамках сессии Chainlit."""
 
     provider: str
     model: str
-    temperature: float = 0.7
-    top_p: float = 0.9
-    max_tokens: int = 2048
+    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    top_p: float = Field(0.9, ge=0.0, le=1.0)
+    max_tokens: int = Field(2048, ge=1)
     seed: int | None = None
-    top_k: int | None = None  # не слать в API, пока не подтверждён бэкенд (M3)
+    top_k: int | None = Field(None, ge=1)  # не слать в API, пока не подтверждён бэкенд (M3)
+    system_prompt: str = "Ты полезный ассистент."
+    stop: list[str] | None = None
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _coerce_seed(cls, value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError("seed должен быть целым числом или пустым")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value)
+        raise ValueError(f"ожидалось целое число, получено: {value!r}")
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _coerce_stop(cls, value: object) -> list[str] | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, list):
+            parts = [str(item).strip() for item in value]
+        else:
+            parts = [part.strip() for part in str(value).split(",")]
+        cleaned = [part for part in parts if part]
+        return cleaned or None
 
 
 @dataclass(slots=True)
@@ -70,6 +94,8 @@ class LLMProvider(ABC):
         }
         if settings.seed is not None:
             payload["seed"] = settings.seed
+        if settings.stop:
+            payload["stop"] = settings.stop
         # M3: top_k НЕ добавлять «если не None». Только флаг + allowlist.
         if self._should_include_top_k(settings):
             payload["top_k"] = settings.top_k

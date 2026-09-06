@@ -33,20 +33,18 @@ class AgentService:
         history: list[ChatMessage],
         settings: ModelSettings,
     ) -> AsyncIterator[str]:
+        system_prompt = settings.system_prompt or self._settings.default_system_prompt
         messages = truncate_messages(
             history,
             max_messages=self._settings.max_history_messages,
             max_chars=self._settings.max_context_chars,
-            system_prompt=self._settings.default_system_prompt,
+            system_prompt=system_prompt,
         )
-        safe_settings = ModelSettings(
-            provider=settings.provider,
-            model=settings.model,
-            temperature=settings.temperature,
-            top_p=settings.top_p,
-            max_tokens=min(settings.max_tokens, self._settings.max_allowed_tokens),
-            seed=settings.seed,
-            top_k=settings.top_k,
+        safe_settings = settings.model_copy(
+            update={
+                "max_tokens": min(settings.max_tokens, self._settings.max_allowed_tokens),
+                "system_prompt": system_prompt,
+            }
         )
 
         started = time.perf_counter()
