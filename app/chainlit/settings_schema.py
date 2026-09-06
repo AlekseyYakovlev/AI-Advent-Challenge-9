@@ -2,12 +2,31 @@ from typing import Any
 
 from chainlit.input_widget import Select, Slider, Switch, TextInput
 
-from app.llm.base import ModelSettings
+from app.llm.base import DEFAULT_EXPERTS_CONFIG, ModelSettings
 
 
 def build_chat_settings(current: ModelSettings) -> list[Any]:
     """Виджеты панели настроек Chainlit."""
+    experts_config = current.experts_config or DEFAULT_EXPERTS_CONFIG
+
     return [
+        Switch(
+            id="expert_panel_enabled",
+            label="Группа экспертов",
+            initial=current.expert_panel_enabled,
+        ),
+        TextInput(
+            id="experts_config",
+            label="Роли экспертов",
+            multiline=True,
+            initial=experts_config,
+            placeholder=(
+                "1. Роль: X\n"
+                "Описание: Y\n"
+                "2. Роль: ...\n"
+                "Описание: ..."
+            ),
+        ),
         Select(
             id="provider",
             label="Провайдер",

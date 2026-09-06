@@ -3,7 +3,13 @@ from pydantic import ValidationError
 
 from app.chainlit.settings_schema import build_chat_settings
 from app.config import Settings, get_settings
-from app.llm.base import ChatMessage, LLMProvider, ModelSettings
+from app.llm.base import (
+    DEFAULT_EXPERTS_CONFIG,
+    EXPERT_PANEL_ACTIVE_NOTICE,
+    ChatMessage,
+    LLMProvider,
+    ModelSettings,
+)
 from app.llm.factory import create_provider
 from app.observability.logging import configure_logging
 from app.services.agent import AgentService, ContextOverflowError
@@ -33,9 +39,12 @@ async def on_chat_start() -> None:
         system_prompt=settings.default_system_prompt,
         step_by_step=False,
         pre_generated_prompt=False,
+        expert_panel_enabled=False,
+        experts_config=DEFAULT_EXPERTS_CONFIG,
     )
     cl.user_session.set("model_settings", model_settings)
     cl.user_session.set("history", [])
+    cl.user_session.set("expert_panel_notice_sent", False)
 
     await cl.ChatSettings(build_chat_settings(model_settings)).send()
     await cl.Message(
@@ -49,6 +58,16 @@ async def on_chat_start() -> None:
 @cl.on_settings_update
 async def on_settings_update(settings: dict[str, object]) -> None:
     current: ModelSettings = cl.user_session.get("model_settings")
+    expert_panel_enabled = bool(
+        settings.get("expert_panel_enabled", current.expert_panel_enabled)
+    )
+    experts_raw = settings.get("experts_config", current.experts_config)
+    experts_config = (
+        DEFAULT_EXPERTS_CONFIG
+        if experts_raw is None
+        else str(experts_raw)
+    )
+
     try:
         updated = ModelSettings(
             provider=str(settings.get("provider", current.provider)),
@@ -72,6 +91,8 @@ async def on_settings_update(settings: dict[str, object]) -> None:
                     "pre_generated_prompt", current.pre_generated_prompt
                 )
             ),
+            expert_panel_enabled=expert_panel_enabled,
+            experts_config=experts_config,
         )
     except (ValidationError, ValueError, TypeError) as exc:
         await cl.Message(content=f"Некорректные настройки: {exc}").send()
@@ -84,9 +105,16 @@ async def on_settings_update(settings: dict[str, object]) -> None:
         )
 
     cl.user_session.set("model_settings", updated)
+    await cl.ChatSettings(build_chat_settings(updated)).send()
     await cl.Message(
         content=f"Настройки обновлены: {updated.provider}/{updated.model}"
     ).send()
+
+    if updated.expert_panel_enabled:
+        await cl.Message(content=EXPERT_PANEL_ACTIVE_NOTICE).send()
+        cl.user_session.set("expert_panel_notice_sent", True)
+    else:
+        cl.user_session.set("expert_panel_notice_sent", False)
 
 
 def wrap_user_question_for_prompt_generation(question: str) -> str:
@@ -105,6 +133,7 @@ async def generate_improved_prompt(
         update={
             "system_prompt": "",  # только user-обёртка, без лишнего system
             "step_by_step": False,
+            "expert_panel_enabled": False,  # этап 1 — обычная генерация промпта
         }
     )
     # В API уходит обёрнутый вопрос, history по-прежнему хранит исходный текст
@@ -128,6 +157,16 @@ async def generate_improved_prompt(
     return (await provider.chat(messages, prompt_gen_settings)).strip()
 
 
+async def _maybe_notify_expert_panel(model_settings: ModelSettings) -> None:
+    """Сообщает пользователю, что кастомный system prompt игнорируется."""
+    if not model_settings.expert_panel_enabled:
+        return
+    if cl.user_session.get("expert_panel_notice_sent"):
+        return
+    await cl.Message(content=EXPERT_PANEL_ACTIVE_NOTICE).send()
+    cl.user_session.set("expert_panel_notice_sent", True)
+
+
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
     model_settings: ModelSettings = cl.user_session.get("model_settings")
@@ -139,6 +178,8 @@ async def on_message(message: cl.Message) -> None:
             update={"max_tokens": app_settings.max_allowed_tokens}
         )
         cl.user_session.set("model_settings", model_settings)
+
+    await _maybe_notify_expert_panel(model_settings)
 
     provider = create_provider(model_settings.provider, app_settings)
     agent = AgentService(provider, app_settings)
