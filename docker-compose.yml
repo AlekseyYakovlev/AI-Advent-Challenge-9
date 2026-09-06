@@ -1,0 +1,27 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: docker
+      # LM Studio на Windows-хосте
+      LMSTUDIO_BASE_URL: http://host.docker.internal:1234/v1
+    extra_hosts:
+      # Docker Desktop Windows / Linux compatibility
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # Опционально: раскомментировать при необходимости
+  # ollama:
+  #   image: ollama/ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+
+# volumes:
+#   ollama_data:
