@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     lmstudio_api_key: str = "lm-studio"
     lmstudio_load_timeout: float = 120.0
     lmstudio_emergency_unload_timeout: float = 5.0
+    # false: модель остаётся в VRAM после остановки FastAPI
     lmstudio_unload_on_shutdown: bool = False
     lmstudio_circuit_breaker_threshold: int = 3
     lmstudio_circuit_breaker_cooldown_seconds: int = 120

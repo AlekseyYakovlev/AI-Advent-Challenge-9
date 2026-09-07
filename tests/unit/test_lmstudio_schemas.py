@@ -23,6 +23,7 @@ def test_valid_model_id(model_id: str) -> None:
     [
         "..",
         "../secret",
+        "/../",
         "../../etc/passwd",
         "models/../secret",
         "foo/../../bar",

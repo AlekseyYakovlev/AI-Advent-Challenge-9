@@ -58,11 +58,7 @@ def is_infrastructure_error(exc: Exception) -> bool:
         # ReadTimeout / общий TimeoutException — не сюда (см. load path)
         if isinstance(exc, httpx.ReadTimeout):
             return False
-        if isinstance(exc, httpx.TimeoutException) and not isinstance(
-            exc, httpx.ConnectTimeout
-        ):
-            return False
-        return True
+        return isinstance(exc, httpx.ConnectTimeout) or not isinstance(exc, httpx.TimeoutException)
 
     if isinstance(exc, APITimeoutError):
         # Таймаут chat/control без connect — не CB по умолчанию
@@ -111,9 +107,7 @@ class EnsureModelReadyResult:
     state: LMStudioState | None = None
 
 
-_CIRCUIT_OPEN_CHAT_MSG = (
-    "Сервис временно недоступен. Повторите через 2 минуты."
-)
+_CIRCUIT_OPEN_CHAT_MSG = "Сервис временно недоступен. Повторите через 2 минуты."
 _LOADING_CHAT_MSG = "Модель ещё загружается. Подождите завершения."
 _MODEL_UNLOADED_CHAT_MSG = "Модель не загружена. Выберите модель заново."
 _INFRA_CHAT_MSG = "Сервис временно недоступен."
@@ -136,16 +130,22 @@ class CircuitBreaker:
             return
         self._failures += 1
         if self._failures >= self._threshold:
+            already_open = self._open_until is not None and datetime.now(UTC) < self._open_until
             self._open_until = datetime.now(UTC) + self._cooldown
-            log.warning(
-                "lmstudio_circuit_open",
-                failures=self._failures,
-                open_until=self._open_until.isoformat(),
-            )
+            if not already_open:
+                log.info(
+                    "lmstudio_circuit_open",
+                    failures=self._failures,
+                    open_until=self._open_until.isoformat(),
+                    cooldown_seconds=int(self._cooldown.total_seconds()),
+                )
 
     def record_success(self) -> None:
+        was_open = self._open_until is not None and datetime.now(UTC) < self._open_until
         self._failures = 0
         self._open_until = None
+        if was_open:
+            log.info("lmstudio_circuit_closed", reason="success")
 
     def is_open(self) -> bool:
         if self._open_until is None:
@@ -153,6 +153,7 @@ class CircuitBreaker:
         if datetime.now(UTC) >= self._open_until:
             self._open_until = None
             self._failures = 0
+            log.info("lmstudio_circuit_closed", reason="cooldown_elapsed")
             return False
         return True
 
@@ -223,7 +224,7 @@ class LMStudioStateManager:
 
             try:
                 models = await self._provider.list_models()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — классификация через is_infrastructure_error
                 if is_infrastructure_error(exc):
                     self._circuit.record_failure(exc)
                     status = (
@@ -276,6 +277,11 @@ class LMStudioStateManager:
             previous = self._state.current_model
             self._state.current_model = request.model_id
             self._set_status(ModelLoadStatus.LOADING, keep_model=True)
+            log.info(
+                "lmstudio_load_started",
+                model_id=request.model_id,
+                previous_model_id=previous,
+            )
 
             result = await self._provider.load_model(
                 request,
@@ -286,6 +292,7 @@ class LMStudioStateManager:
                 self._circuit.record_success()
                 self._state.current_model = request.model_id
                 self._set_status(ModelLoadStatus.LOADED, keep_model=True)
+                log.info("lmstudio_load_success", model_id=request.model_id)
                 return result
 
             if result.status == ModelLoadStatus.UNREACHABLE:
@@ -296,6 +303,12 @@ class LMStudioStateManager:
                         ModelLoadStatus.CIRCUIT_OPEN,
                         keep_model=True,
                         retry_after=retry,
+                    )
+                    log.info(
+                        "lmstudio_load_error",
+                        model_id=request.model_id,
+                        status=ModelLoadStatus.CIRCUIT_OPEN.value,
+                        message=result.message,
                     )
                     return ModelLoadResult(
                         status=ModelLoadStatus.CIRCUIT_OPEN,
@@ -308,6 +321,12 @@ class LMStudioStateManager:
                     keep_model=True,
                     detail=result.message,
                 )
+                log.info(
+                    "lmstudio_load_error",
+                    model_id=request.model_id,
+                    status=ModelLoadStatus.UNREACHABLE.value,
+                    message=result.message,
+                )
                 return result
 
             # ERROR (включая таймаут загрузки + аварийный unload)
@@ -316,6 +335,12 @@ class LMStudioStateManager:
                 ModelLoadStatus.ERROR,
                 keep_model=True,
                 detail=result.message,
+            )
+            log.info(
+                "lmstudio_load_error",
+                model_id=request.model_id,
+                status=ModelLoadStatus.ERROR.value,
+                message=result.message,
             )
             return result
 
@@ -337,6 +362,7 @@ class LMStudioStateManager:
                     message=_STATUS_MESSAGES[ModelLoadStatus.IDLE],
                 )
 
+            log.info("lmstudio_unload_started", model_id=model_id)
             result = await self._provider.unload_model(model_id)
             if result.status == ModelLoadStatus.UNREACHABLE:
                 self._circuit.record_failure(httpx.ConnectError(result.message))
@@ -366,6 +392,7 @@ class LMStudioStateManager:
             self._state.current_model = None
             self._circuit.record_success()
             self._set_status(ModelLoadStatus.IDLE)
+            log.info("lmstudio_unload_success", model_id=model_id)
             return ModelLoadResult(
                 status=ModelLoadStatus.IDLE,
                 message=_STATUS_MESSAGES[ModelLoadStatus.IDLE],
@@ -400,10 +427,7 @@ class LMStudioStateManager:
             detail = state.message or _STATUS_MESSAGES[ModelLoadStatus.ERROR]
             return EnsureModelReadyResult(
                 ok=False,
-                message=(
-                    f"{detail}\n"
-                    "Выберите другую модель или повторите загрузку."
-                ),
+                message=(f"{detail}\nВыберите другую модель или повторите загрузку."),
                 state=state,
             )
 
@@ -435,10 +459,7 @@ class LMStudioStateManager:
 
         return EnsureModelReadyResult(
             ok=False,
-            message=(
-                result.message
-                or f"Не удалось загрузить модель `{model_id}`."
-            ),
+            message=(result.message or f"Не удалось загрузить модель `{model_id}`."),
             state=final,
         )
 
@@ -449,16 +470,28 @@ class LMStudioStateManager:
             ModelLoadStatus.UNREACHABLE,
         ):
             return
+        previous = self._state.status
         self._auto_load_blocked_model = None
         self._circuit.record_success()
         self._state.current_model = model_id
         self._set_status(ModelLoadStatus.LOADED, keep_model=True)
+        log.info(
+            "lmstudio_optimistic_status_recovery",
+            model_id=model_id,
+            previous_status=previous.value,
+            new_status=ModelLoadStatus.LOADED.value,
+        )
 
     def mark_unloaded(self, *, block_auto_reload_for: str | None = None) -> None:
         if block_auto_reload_for:
             self._auto_load_blocked_model = block_auto_reload_for
+        previous_model = self._state.current_model
         self._state.current_model = None
         self._set_status(ModelLoadStatus.IDLE)
+        log.info(
+            "lmstudio_status_reset_model_unloaded",
+            model_id=block_auto_reload_for or previous_model,
+        )
 
     def record_infrastructure_failure(self, exc: Exception) -> None:
         self._circuit.record_failure(exc)
@@ -510,9 +543,7 @@ class LMStudioStateManager:
             self._state.current_model = None
         base = _STATUS_MESSAGES[status]
         if status == ModelLoadStatus.CIRCUIT_OPEN and retry_after is not None:
-            self._state.message = (
-                f"{base}. Повторная попытка примерно через {retry_after} с."
-            )
+            self._state.message = f"{base}. Повторная попытка примерно через {retry_after} с."
         elif detail:
             self._state.message = f"{base}: {detail}"
         else:
