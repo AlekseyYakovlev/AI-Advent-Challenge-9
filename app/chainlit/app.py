@@ -1,6 +1,13 @@
 import chainlit as cl
+from dataclasses import replace
+
 from pydantic import ValidationError
 
+from app.chainlit.components import (
+    ACTION_SELECT_MODEL,
+    REFRESH_THROTTLED_TEXT,
+    send_or_update_model_switcher,
+)
 from app.chainlit.settings_schema import (
     build_chat_settings,
     draft_settings_from_ui,
@@ -17,8 +24,13 @@ from app.llm.base import (
 )
 from app.llm.factory import create_provider
 from app.observability.logging import configure_logging
+from app.schemas.lmstudio import ModelLoadRequest, ModelLoadStatus
 from app.services.agent import AgentService, ContextOverflowError
 from app.services.context import truncate_messages
+from app.services.lmstudio_state import (
+    LMStudioState,
+    get_lmstudio_state_manager,
+)
 
 # Важно: при `chainlit run` FastAPI lifespan не выполняется —
 # конфигурируем логи здесь (idempotent, дубль с main.py безопасен).
@@ -29,6 +41,104 @@ PROMPT_GEN_USER_TEMPLATE = (
     'Generate a prompt to solve the following question: "{question}". '
     'Return only the prompt.'
 )
+
+
+async def _lm_state_snapshot(*, force_refresh: bool = False) -> LMStudioState:
+    mgr = get_lmstudio_state_manager()
+    result = await mgr.refresh_models(force=force_refresh)
+    return result.state
+
+
+async def _push_settings(model_settings: ModelSettings) -> LMStudioState | None:
+    lm_state: LMStudioState | None = None
+    if model_settings.provider == "lmstudio":
+        lm_state = await _lm_state_snapshot(force_refresh=False)
+    await cl.ChatSettings(
+        build_chat_settings(model_settings, lm_state=lm_state)
+    ).send()
+    return lm_state
+
+
+async def _refresh_switcher(
+    model_settings: ModelSettings,
+    lm_state: LMStudioState | None,
+) -> None:
+    existing: cl.Message | None = cl.user_session.get("lmstudio_switcher_msg")
+    msg = await send_or_update_model_switcher(
+        provider=model_settings.provider,
+        session_model=model_settings.model,
+        state=lm_state,
+        existing=existing if isinstance(existing, cl.Message) else None,
+    )
+    cl.user_session.set("lmstudio_switcher_msg", msg)
+
+
+async def _load_lmstudio_model(
+    model_id: str,
+    model_settings: ModelSettings,
+) -> ModelSettings:
+    """Загрузка модели + обновление session/settings/switcher. Возвращает settings."""
+    mgr = get_lmstudio_state_manager()
+    state = mgr.get_state()
+
+    if state.status == ModelLoadStatus.CIRCUIT_OPEN:
+        await cl.Message(
+            content=(
+                "🔒 Сервис временно недоступен. "
+                "Следующая попытка примерно через 2 минуты."
+            )
+        ).send()
+        await _refresh_switcher(model_settings, state)
+        return model_settings
+
+    if state.status == ModelLoadStatus.LOADING:
+        await cl.Message(
+            content="🟡 Загрузка уже выполняется. Дождитесь завершения."
+        ).send()
+        await _refresh_switcher(model_settings, state)
+        return model_settings
+
+    progress = cl.Message(content=f"🟡 Загрузка модели `{model_id}`…")
+    await progress.send()
+
+    ui_loading = replace(
+        mgr.get_state(),
+        status=ModelLoadStatus.LOADING,
+        current_model=model_id,
+        message="Загрузка...",
+    )
+    await _refresh_switcher(model_settings, ui_loading)
+
+    try:
+        request = ModelLoadRequest(model_id=model_id)
+    except ValidationError as exc:
+        await progress.remove()
+        await cl.Message(content=f"🔴 Некорректный model_id: {exc}").send()
+        return model_settings
+
+    result = await mgr.load_model(request)
+    final_state = mgr.get_state()
+
+    updated = model_settings.model_copy(update={"model": model_id, "provider": "lmstudio"})
+    cl.user_session.set("model_settings", updated)
+    await _push_settings(updated)
+    await _refresh_switcher(updated, final_state)
+
+    if result.status == ModelLoadStatus.LOADED:
+        progress.content = f"✅ Модель загружена: `{model_id}`"
+        await progress.update()
+    elif result.status == ModelLoadStatus.CIRCUIT_OPEN:
+        progress.content = (
+            f"🔒 {result.message or 'Сервис временно недоступен.'}"
+        )
+        await progress.update()
+    else:
+        progress.content = (
+            f"🔴 Ошибка загрузки `{model_id}`: {result.message}"
+        )
+        await progress.update()
+
+    return updated
 
 
 @cl.on_chat_start
@@ -50,6 +160,7 @@ async def on_chat_start() -> None:
     cl.user_session.set("model_settings", model_settings)
     cl.user_session.set("history", [])
     cl.user_session.set("expert_panel_notice_sent", False)
+    cl.user_session.set("lmstudio_switcher_msg", None)
     cl.user_session.set(
         "exclusive_modes_snapshot",
         exclusive_modes_snapshot(
@@ -59,13 +170,14 @@ async def on_chat_start() -> None:
         ),
     )
 
-    await cl.ChatSettings(build_chat_settings(model_settings)).send()
+    lm_state = await _push_settings(model_settings)
     await cl.Message(
         content=(
             f"Готов. Провайдер: `{model_settings.provider}`, "
             f"модель: `{model_settings.model}`."
         )
     ).send()
+    await _refresh_switcher(model_settings, lm_state)
 
 
 def _resolve_modes_against_baseline(
@@ -86,7 +198,7 @@ def _resolve_modes_against_baseline(
 
 @cl.on_settings_edit
 async def on_settings_edit(settings: dict[str, object]) -> None:
-    """Живое обновление UI: гасит конфликтующие Switch сразу при клике."""
+    """Живое обновление UI: exclusive modes + смена провайдера → виджеты LM Studio."""
     current: ModelSettings = cl.user_session.get("model_settings")
     snapshot = cl.user_session.get("exclusive_modes_snapshot")
     baseline = (
@@ -111,12 +223,19 @@ async def on_settings_edit(settings: dict[str, object]) -> None:
     )
     cl.user_session.set("exclusive_modes_snapshot", new_snapshot)
 
-    # Без изменений — не дергаем refresh (защита от лишних циклов).
-    if (step_by_step, pre_generated_prompt, expert_panel_enabled) == (
+    incoming_provider = str(settings.get("provider", current.provider))
+    modes_changed = (step_by_step, pre_generated_prompt, expert_panel_enabled) != (
         incoming_step,
         incoming_pre,
         incoming_expert,
-    ):
+    )
+    provider_changed = incoming_provider != current.provider
+    # Lazy: при открытии/смене на lmstudio подтянуть список без force
+    need_lm_widgets = incoming_provider == "lmstudio" and (
+        provider_changed or modes_changed
+    )
+
+    if not modes_changed and not provider_changed and not need_lm_widgets:
         return
 
     try:
@@ -130,8 +249,13 @@ async def on_settings_edit(settings: dict[str, object]) -> None:
     except (ValidationError, ValueError, TypeError):
         return
 
-    # refresh() пушит виджеты в открытую панель Settings, не коммитя session.
-    await cl.ChatSettings(build_chat_settings(draft)).refresh()
+    lm_state: LMStudioState | None = None
+    if draft.provider == "lmstudio":
+        lm_state = await _lm_state_snapshot(force_refresh=False)
+
+    await cl.ChatSettings(
+        build_chat_settings(draft, lm_state=lm_state)
+    ).refresh()
 
 
 @cl.on_settings_update
@@ -159,6 +283,54 @@ async def on_settings_update(settings: dict[str, object]) -> None:
             update={"max_tokens": app_settings.max_allowed_tokens}
         )
 
+    want_refresh = bool(settings.get("lmstudio_refresh_models"))
+    lm_state: LMStudioState | None = None
+
+    if updated.provider == "lmstudio":
+        mgr = get_lmstudio_state_manager()
+        if want_refresh:
+            refresh = await mgr.refresh_models(force=True)
+            lm_state = refresh.state
+            if refresh.throttled:
+                await cl.Message(content=REFRESH_THROTTLED_TEXT).send()
+            elif refresh.state.status == ModelLoadStatus.CIRCUIT_OPEN:
+                await cl.Message(
+                    content=(
+                        "🔒 Сервис временно недоступен. "
+                        "Следующая попытка примерно через 2 минуты."
+                    )
+                ).send()
+            else:
+                await cl.Message(
+                    content=(
+                        f"Список моделей обновлён "
+                        f"({len(refresh.state.available_models)} шт.)."
+                    )
+                ).send()
+        else:
+            lm_state = (await mgr.refresh_models(force=False)).state
+
+        switched_to_lm = current.provider != "lmstudio"
+        model_changed = updated.model != current.model
+        should_load = switched_to_lm or model_changed
+        if should_load and updated.model:
+            cl.user_session.set("model_settings", updated)
+            cl.user_session.set(
+                "exclusive_modes_snapshot",
+                exclusive_modes_snapshot(
+                    updated.step_by_step,
+                    updated.pre_generated_prompt,
+                    updated.expert_panel_enabled,
+                ),
+            )
+            updated = await _load_lmstudio_model(updated.model, updated)
+            if updated.expert_panel_enabled:
+                await cl.Message(content=EXPERT_PANEL_ACTIVE_NOTICE).send()
+                cl.user_session.set("expert_panel_notice_sent", True)
+            else:
+                cl.user_session.set("expert_panel_notice_sent", False)
+            return
+
     cl.user_session.set("model_settings", updated)
     cl.user_session.set(
         "exclusive_modes_snapshot",
@@ -168,7 +340,14 @@ async def on_settings_update(settings: dict[str, object]) -> None:
             updated.expert_panel_enabled,
         ),
     )
-    await cl.ChatSettings(build_chat_settings(updated)).send()
+
+    if updated.provider == "lmstudio" and lm_state is None:
+        lm_state = await _lm_state_snapshot(force_refresh=False)
+
+    await cl.ChatSettings(
+        build_chat_settings(updated, lm_state=lm_state)
+    ).send()
+    await _refresh_switcher(updated, lm_state)
 
     notes: list[str] = [
         f"Настройки обновлены: {updated.provider}/{updated.model}"
@@ -192,6 +371,24 @@ async def on_settings_update(settings: dict[str, object]) -> None:
         cl.user_session.set("expert_panel_notice_sent", True)
     else:
         cl.user_session.set("expert_panel_notice_sent", False)
+
+
+@cl.action_callback(ACTION_SELECT_MODEL)
+async def on_lmstudio_select_model(action: cl.Action) -> None:
+    model_settings: ModelSettings = cl.user_session.get("model_settings")
+    if model_settings.provider != "lmstudio":
+        await cl.Message(
+            content="Переключатель моделей доступен только для провайдера lmstudio."
+        ).send()
+        return
+
+    payload = action.payload or {}
+    model_id = str(payload.get("model_id", "")).strip()
+    if not model_id:
+        await cl.Message(content="🔴 Не указана модель.").send()
+        return
+
+    await _load_lmstudio_model(model_id, model_settings)
 
 
 def wrap_user_question_for_prompt_generation(question: str) -> str:
@@ -292,6 +489,8 @@ async def on_message(message: cl.Message) -> None:
     # Не класть текст ошибки в history — иначе загрязнит следующие запросы
     if succeeded:
         history.append(ChatMessage(role="assistant", content=reply.content))
+        if model_settings.provider == "lmstudio":
+            get_lmstudio_state_manager().mark_chat_success(model_settings.model)
     cl.user_session.set("history", history)
 
 
@@ -351,4 +550,6 @@ async def _on_message_with_pre_generated_prompt(
         history.append(
             ChatMessage(role="assistant", content="".join(answer_parts))
         )
+        if model_settings.provider == "lmstudio":
+            get_lmstudio_state_manager().mark_chat_success(model_settings.model)
     cl.user_session.set("history", history)

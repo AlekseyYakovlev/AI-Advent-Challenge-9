@@ -14,8 +14,15 @@ class Settings(BaseSettings):
     default_provider: str = "lmstudio"
     default_model: str = "Bionic"
 
-    lmstudio_base_url: str = "http://localhost:1234/v1"
+    lmstudio_base_url: str = "http://localhost:1234"
     lmstudio_api_key: str = "lm-studio"
+    lmstudio_load_timeout: float = 120.0
+    lmstudio_emergency_unload_timeout: float = 5.0
+    lmstudio_unload_on_shutdown: bool = False
+    lmstudio_circuit_breaker_threshold: int = 3
+    lmstudio_circuit_breaker_cooldown_seconds: int = 120
+    lmstudio_models_cache_ttl_seconds: int = 300
+    lmstudio_refresh_min_interval_seconds: int = 5
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_api_key: str = "ollama"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
