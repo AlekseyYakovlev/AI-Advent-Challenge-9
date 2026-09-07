@@ -28,8 +28,11 @@ from app.schemas.lmstudio import ModelLoadRequest, ModelLoadStatus
 from app.services.agent import AgentService, ContextOverflowError
 from app.services.context import truncate_messages
 from app.services.lmstudio_state import (
+    EnsureModelReadyResult,
     LMStudioState,
     get_lmstudio_state_manager,
+    is_infrastructure_error,
+    is_model_unloaded_error,
 )
 
 # Важно: при `chainlit run` FastAPI lifespan не выполняется —
@@ -79,6 +82,7 @@ async def _load_lmstudio_model(
 ) -> ModelSettings:
     """Загрузка модели + обновление session/settings/switcher. Возвращает settings."""
     mgr = get_lmstudio_state_manager()
+    mgr.clear_auto_load_block()
     state = mgr.get_state()
 
     if state.status == ModelLoadStatus.CIRCUIT_OPEN:
@@ -140,6 +144,29 @@ async def _load_lmstudio_model(
 
     return updated
 
+
+async def _ensure_lmstudio_ready(
+    model_settings: ModelSettings,
+) -> EnsureModelReadyResult | None:
+    """Для lmstudio — проверка/автозагрузка перед генерацией. None = не lmstudio."""
+    if model_settings.provider != "lmstudio":
+        return None
+
+    mgr = get_lmstudio_state_manager()
+    result = await mgr.ensure_ready_for_generation(model_settings.model)
+    if result.state is not None:
+        await _refresh_switcher(model_settings, result.state)
+    return result
+
+
+def _format_generation_error(exc: Exception, model_settings: ModelSettings) -> str:
+    """Сообщение об ошибке генерации; для lmstudio — классификация + side-effects."""
+    if model_settings.provider != "lmstudio":
+        return f"Ошибка LLM: {exc}"
+    return get_lmstudio_state_manager().format_chat_error(
+        exc,
+        model_id=model_settings.model,
+    )
 
 @cl.on_chat_start
 async def on_chat_start() -> None:
@@ -455,6 +482,11 @@ async def on_message(message: cl.Message) -> None:
 
     await _maybe_notify_expert_panel(model_settings)
 
+    ready = await _ensure_lmstudio_ready(model_settings)
+    if ready is not None and not ready.ok:
+        await cl.Message(content=ready.message or "Модель недоступна.").send()
+        return
+
     provider = create_provider(model_settings.provider, app_settings)
     agent = AgentService(provider, app_settings)
 
@@ -482,7 +514,15 @@ async def on_message(message: cl.Message) -> None:
         # Явно ПЕРЕД except Exception — иначе пользователь не увидит точный текст (M1)
         await reply.stream_token(f"\n\n{exc}")
     except Exception as exc:
-        await reply.stream_token(f"\n\nОшибка LLM: {exc}")
+        err_text = _format_generation_error(exc, model_settings)
+        await reply.stream_token(f"\n\n{err_text}")
+        if model_settings.provider == "lmstudio" and (
+            is_model_unloaded_error(exc) or is_infrastructure_error(exc)
+        ):
+            await _refresh_switcher(
+                model_settings,
+                get_lmstudio_state_manager().get_state(),
+            )
     finally:
         await reply.update()
 
@@ -491,6 +531,10 @@ async def on_message(message: cl.Message) -> None:
         history.append(ChatMessage(role="assistant", content=reply.content))
         if model_settings.provider == "lmstudio":
             get_lmstudio_state_manager().mark_chat_success(model_settings.model)
+            await _refresh_switcher(
+                model_settings,
+                get_lmstudio_state_manager().get_state(),
+            )
     cl.user_session.set("history", history)
 
 
@@ -514,9 +558,15 @@ async def _on_message_with_pre_generated_prompt(
         cl.user_session.set("history", history)
         return
     except Exception as exc:
-        await cl.Message(
-            content=f"⚠️ Ошибка генерации промпта: {exc}"
-        ).send()
+        err_text = _format_generation_error(exc, model_settings)
+        await cl.Message(content=f"⚠️ {err_text}").send()
+        if model_settings.provider == "lmstudio" and (
+            is_model_unloaded_error(exc) or is_infrastructure_error(exc)
+        ):
+            await _refresh_switcher(
+                model_settings,
+                get_lmstudio_state_manager().get_state(),
+            )
         cl.user_session.set("history", history)
         return
 
@@ -541,7 +591,15 @@ async def _on_message_with_pre_generated_prompt(
     except ContextOverflowError as exc:
         await reply.stream_token(f"\n\n⚠️ {exc}")
     except Exception as exc:
-        await reply.stream_token(f"\n\n⚠️ Ошибка LLM: {exc}")
+        err_text = _format_generation_error(exc, model_settings)
+        await reply.stream_token(f"\n\n⚠️ {err_text}")
+        if model_settings.provider == "lmstudio" and (
+            is_model_unloaded_error(exc) or is_infrastructure_error(exc)
+        ):
+            await _refresh_switcher(
+                model_settings,
+                get_lmstudio_state_manager().get_state(),
+            )
     finally:
         await reply.update()
 
@@ -552,4 +610,8 @@ async def _on_message_with_pre_generated_prompt(
         )
         if model_settings.provider == "lmstudio":
             get_lmstudio_state_manager().mark_chat_success(model_settings.model)
+            await _refresh_switcher(
+                model_settings,
+                get_lmstudio_state_manager().get_state(),
+            )
     cl.user_session.set("history", history)

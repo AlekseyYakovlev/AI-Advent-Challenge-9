@@ -102,6 +102,23 @@ class RefreshModelsResult:
     throttled: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class EnsureModelReadyResult:
+    """Результат проверки/автозагрузки модели перед генерацией."""
+
+    ok: bool
+    message: str | None = None
+    state: LMStudioState | None = None
+
+
+_CIRCUIT_OPEN_CHAT_MSG = (
+    "Сервис временно недоступен. Повторите через 2 минуты."
+)
+_LOADING_CHAT_MSG = "Модель ещё загружается. Подождите завершения."
+_MODEL_UNLOADED_CHAT_MSG = "Модель не загружена. Выберите модель заново."
+_INFRA_CHAT_MSG = "Сервис временно недоступен."
+
+
 class CircuitBreaker:
     def __init__(
         self,
@@ -171,6 +188,9 @@ class LMStudioStateManager:
         )
         self._cache_ttl = timedelta(seconds=models_cache_ttl_seconds)
         self._refresh_min_interval = timedelta(seconds=refresh_min_interval_seconds)
+        # Блокирует повторную автозагрузку той же модели после неудачи
+        # (явный выбор пользователем снимает блок через clear_auto_load_block).
+        self._auto_load_blocked_model: str | None = None
 
     def get_state(self) -> LMStudioState:
         self._sync_circuit_into_state()
@@ -351,14 +371,92 @@ class LMStudioStateManager:
                 message=_STATUS_MESSAGES[ModelLoadStatus.IDLE],
             )
 
+    def clear_auto_load_block(self) -> None:
+        """Снять блок автозагрузки (явный выбор модели пользователем)."""
+        self._auto_load_blocked_model = None
+
+    async def ensure_ready_for_generation(
+        self,
+        model_id: str,
+    ) -> EnsureModelReadyResult:
+        """Перед чатом: статусы CIRCUIT/LOADING/ERROR или автозагрузка при mismatch."""
+        state = self.get_state()
+
+        if state.status == ModelLoadStatus.CIRCUIT_OPEN:
+            return EnsureModelReadyResult(
+                ok=False,
+                message=_CIRCUIT_OPEN_CHAT_MSG,
+                state=state,
+            )
+
+        if state.status == ModelLoadStatus.LOADING:
+            return EnsureModelReadyResult(
+                ok=False,
+                message=_LOADING_CHAT_MSG,
+                state=state,
+            )
+
+        if state.status == ModelLoadStatus.ERROR:
+            detail = state.message or _STATUS_MESSAGES[ModelLoadStatus.ERROR]
+            return EnsureModelReadyResult(
+                ok=False,
+                message=(
+                    f"{detail}\n"
+                    "Выберите другую модель или повторите загрузку."
+                ),
+                state=state,
+            )
+
+        if state.current_model == model_id:
+            return EnsureModelReadyResult(ok=True, state=state)
+
+        if self._auto_load_blocked_model == model_id:
+            return EnsureModelReadyResult(
+                ok=False,
+                message=_MODEL_UNLOADED_CHAT_MSG,
+                state=state,
+            )
+
+        result = await self.load_model(ModelLoadRequest(model_id=model_id))
+        final = self.get_state()
+
+        if result.status == ModelLoadStatus.LOADED:
+            self._auto_load_blocked_model = None
+            return EnsureModelReadyResult(ok=True, state=final)
+
+        self._auto_load_blocked_model = model_id
+
+        if result.status == ModelLoadStatus.CIRCUIT_OPEN:
+            return EnsureModelReadyResult(
+                ok=False,
+                message=_CIRCUIT_OPEN_CHAT_MSG,
+                state=final,
+            )
+
+        return EnsureModelReadyResult(
+            ok=False,
+            message=(
+                result.message
+                or f"Не удалось загрузить модель `{model_id}`."
+            ),
+            state=final,
+        )
+
     def mark_chat_success(self, model_id: str) -> None:
-        """Оптимистично: IDLE → LOADED после успешного чата."""
-        if self._state.status != ModelLoadStatus.IDLE:
+        """Оптимистично: IDLE/UNREACHABLE → LOADED после успешного чата."""
+        if self._state.status not in (
+            ModelLoadStatus.IDLE,
+            ModelLoadStatus.UNREACHABLE,
+        ):
             return
+        self._auto_load_blocked_model = None
+        self._circuit.record_success()
         self._state.current_model = model_id
         self._set_status(ModelLoadStatus.LOADED, keep_model=True)
 
-    def mark_unloaded(self) -> None:
+    def mark_unloaded(self, *, block_auto_reload_for: str | None = None) -> None:
+        if block_auto_reload_for:
+            self._auto_load_blocked_model = block_auto_reload_for
         self._state.current_model = None
         self._set_status(ModelLoadStatus.IDLE)
 
@@ -376,6 +474,16 @@ class LMStudioStateManager:
                 keep_model=True,
                 detail=str(exc),
             )
+
+    def format_chat_error(self, exc: Exception, *, model_id: str) -> str:
+        """Классифицировать ошибку генерации; при необходимости обновить state."""
+        if is_model_unloaded_error(exc):
+            self.mark_unloaded(block_auto_reload_for=model_id)
+            return _MODEL_UNLOADED_CHAT_MSG
+        if is_infrastructure_error(exc):
+            self.record_infrastructure_failure(exc)
+            return _INFRA_CHAT_MSG
+        return f"Ошибка LLM: {exc}"
 
     def _sync_circuit_into_state(self) -> None:
         if self._circuit.is_open():
